@@ -86,6 +86,16 @@ public sealed class TorrentService : IAsyncDisposable
     // recheck attempts if the tick fires while a previous recheck is still running (Hash-
     // CheckAsync on a large torrent can take minutes).
     private readonly HashSet<TorrentManager> _stallRecheckInProgress = new();
+
+    // Consecutive "stuck Downloading" hit counter — Downloading state with near-zero rate
+    // despite the peer pool being non-empty. When we hit the threshold we trigger a
+    // tracker + DHT re-announce to try to grow the pool with fresher addresses (the
+    // current ones may all be unreachable behind restrictive NAT / firewall). Reset on
+    // any positive download activity. Cool-down between re-announces is tracked in
+    // _stuckDownloadCooldownTicks to avoid hammering trackers when the underlying
+    // problem won't be fixed by more announces.
+    private readonly Dictionary<TorrentManager, int> _stuckDownloadHits = new();
+    private readonly Dictionary<TorrentManager, int> _stuckDownloadCooldownTicks = new();
     // Periodic stall watchdog. Fires every 30 s after a 60 s startup grace period, so freshly-
     // restored torrents get time to legitimately settle before we start second-guessing state.
     private readonly System.Threading.Timer _stallTimer;
@@ -131,9 +141,15 @@ public sealed class TorrentService : IAsyncDisposable
             },
             // Fixed listen endpoints so UPnP/NAT-PMP maps a stable port across restarts
             // (peers can reconnect to the same address; DHT UDP socket doesn't shift).
+            // Both IPv4 and IPv6 listeners bind so we reach swarms where the remote peer
+            // is IPv6-only (some wifi/CGN networks assign v6 addresses that v4-only peers
+            // can't dial in to). IPv6 listener is cheap when the OS has no v6 route — bind
+            // just fails silently and IPv4 keeps working. Keys must be unique within the
+            // dictionary; MonoTorrent doesn't care what strings we use for them.
             ListenEndPoints = new System.Collections.Generic.Dictionary<string, IPEndPoint>
             {
-                { "ipv4", new IPEndPoint(IPAddress.Any, PeerListenPort) },
+                { "ipv4", new IPEndPoint(IPAddress.Any,     PeerListenPort) },
+                { "ipv6", new IPEndPoint(IPAddress.IPv6Any, PeerListenPort) },
             },
             DhtEndPoint = new IPEndPoint(IPAddress.Any, PeerListenPort),
             // Note: MonoTorrent 3.0.2 doesn't expose DhtBootstrapRouters — it uses its
@@ -418,6 +434,10 @@ public sealed class TorrentService : IAsyncDisposable
             {
                 _persistedByManager.Remove(manager);
                 _restartPolicies.Remove(manager);
+                _stallHits.Remove(manager);
+                _stallRecheckInProgress.Remove(manager);
+                _stuckDownloadHits.Remove(manager);
+                _stuckDownloadCooldownTicks.Remove(manager);
                 TorrentRemoved?.Invoke(this, manager);
                 try { await SaveStateAsync(); }
                 catch (Exception ex) { DebugLog.Error("SaveStateAsync in remove finally", ex); }
@@ -816,9 +836,113 @@ public sealed class TorrentService : IAsyncDisposable
             {
                 try { EvaluateOneForStall(m); }
                 catch (Exception ex) { DebugLog.Error($"stall check '{ShortName(m.Torrent?.Name)}'", ex); }
+                try { EvaluateOneForStuckDownload(m); }
+                catch (Exception ex) { DebugLog.Error($"stuck-download check '{ShortName(m.Torrent?.Name)}'", ex); }
             }
         }
         catch (Exception ex) { DebugLog.Error("stall check tick", ex); }
+    }
+
+    // Below this rate (bytes/sec) we consider the torrent to have zero effective progress.
+    // 1 KiB/s lets us distinguish "actually flowing, just slow" from "essentially stuck" —
+    // a bulk download idling below 1 KiB/s for minutes is functionally frozen.
+    private const long StuckDownloadRateThreshold = 1024;
+    // Hits required before we trigger a re-announce. 30 s timer × 6 = ~3 min of continuous
+    // stuck-Downloading before we intervene. Shorter and we'd hammer trackers on a
+    // transient network hiccup; longer and the user stares at 0 B/s for too long.
+    private const int StuckDownloadHitsRequired = 6;
+    // After a re-announce, wait this many ticks (~3 min) before firing another one for the
+    // same manager. Announces are rate-limited per BEP 3; hammering trackers gets us
+    // temporarily banned and doesn't grow the peer pool any faster.
+    private const int StuckDownloadCooldownTicks = 6;
+
+    // Companion to EvaluateOneForStall — same 30 s tick but watches for the opposite
+    // failure: state=Downloading, near-zero rate, peers known to exist but not delivering.
+    // Trigger action is a tracker + DHT re-announce, which grows the peer pool with fresh
+    // addresses. Doesn't attempt hash recheck (that path is EvaluateOneForStall's and
+    // requires a Stopped intermediate state, disrupting an already-running download).
+    private void EvaluateOneForStuckDownload(TorrentManager m)
+    {
+        // Only Downloading state qualifies. Metadata / Hashing / Starting / Seeding have
+        // their own semantics — zero rate there is normal or handled elsewhere.
+        if (m.State != TorrentState.Downloading)
+        {
+            _stuckDownloadHits.Remove(m);
+            _stuckDownloadCooldownTicks.Remove(m);
+            return;
+        }
+
+        // Bleed off cool-down first — even if we're stuck this tick, we won't act until
+        // the previous re-announce has had time to take effect (peer pool refresh, choke
+        // rotation, ~2 min for most trackers to accept a second announce).
+        if (_stuckDownloadCooldownTicks.TryGetValue(m, out var cd) && cd > 0)
+        {
+            _stuckDownloadCooldownTicks[m] = cd - 1;
+            _stuckDownloadHits.Remove(m); // any hits collected during cool-down don't count
+            return;
+        }
+
+        long rate = 0;
+        int available = 0;
+        try { rate = m.Monitor.DownloadRate; } catch { }
+        try { available = m.Peers.Available; } catch { }
+
+        // Positive activity resets the counter — we only care about consecutive stuck ticks.
+        if (rate >= StuckDownloadRateThreshold)
+        {
+            _stuckDownloadHits.Remove(m);
+            return;
+        }
+
+        // No peers available and zero rate is a discovery problem, not a delivery problem.
+        // Re-announce is exactly the right lever for that too, but we already announce
+        // regularly via the tracker's own interval — piling on doesn't help. Wait for the
+        // pool to grow via the normal path.
+        if (available <= 0)
+        {
+            _stuckDownloadHits.Remove(m);
+            return;
+        }
+
+        _stuckDownloadHits.TryGetValue(m, out var hits);
+        hits++;
+        _stuckDownloadHits[m] = hits;
+
+        var name = ShortName(m.Torrent?.Name);
+        DebugLog.Info($"stuck-download: '{name}' D={Formatting.RateToHuman(rate)} " +
+                      $"avail={available} (hit {hits}/{StuckDownloadHitsRequired})");
+
+        if (hits < StuckDownloadHitsRequired) return;
+
+        _stuckDownloadHits.Remove(m);
+        _stuckDownloadCooldownTicks[m] = StuckDownloadCooldownTicks;
+        _ = Task.Run(() => TryStuckDownloadReannounceAsync(m));
+    }
+
+    // Fire a tracker + DHT re-announce off the timer thread. Both are best-effort — a
+    // tracker may reply with min-interval (rejecting the early re-announce), and DHT
+    // announce is fire-and-forget by design. Anything that grows the peer pool with a
+    // fresher address list is a win vs. sitting at 0 B/s.
+    private async Task TryStuckDownloadReannounceAsync(TorrentManager m)
+    {
+        var name = ShortName(m.Torrent?.Name);
+        try
+        {
+            DebugLog.Info($"stuck-download: '{name}' triggering tracker + DHT re-announce");
+            var tm = m.TrackerManager;
+            if (tm is not null)
+            {
+                try { await tm.AnnounceAsync(System.Threading.CancellationToken.None); }
+                catch (Exception ex) { DebugLog.Error($"stuck-download tracker announce '{name}'", ex); }
+            }
+            try { await m.DhtAnnounceAsync(); }
+            catch (Exception ex) { DebugLog.Error($"stuck-download dht announce '{name}'", ex); }
+            DebugLog.Info($"stuck-download: '{name}' re-announce dispatched");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Error($"stuck-download re-announce '{name}'", ex);
+        }
     }
 
     private void EvaluateOneForStall(TorrentManager m)

@@ -15,3 +15,8 @@ bot.txt
 # Generated
 *.log
 /.env
+
+# Session artifacts (Playwright MCP screenshots, ad-hoc screen grabs)
+.playwright-mcp/
+/screen.jpg
+/jtc-viewer-*.png

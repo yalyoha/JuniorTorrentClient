@@ -17,6 +17,12 @@ public partial class App : Application
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Start cloud log forwarding first thing so even the OnLaunched trace lines below
+        // reach jtc.alekseylosev.ru. Always-on for now — the intent is to see every install
+        // in one place while the app is still in early-usage debugging phase.
+        var jtcVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0";
+        CloudLogSink.Start(enabled: true, version: jtcVersion);
+
         var cliArgs = Environment.GetCommandLineArgs();
         // Log BOTH activation sources so we can diagnose "double-click doesn't add" reports:
         //   Environment.GetCommandLineArgs() — the process's raw CLI (works in unpackaged

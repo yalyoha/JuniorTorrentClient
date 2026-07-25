@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+dist/
+
+# IDE
+.idea/
+.vs/
+*.user
+*.suo
+
+# Local secrets
+bot.txt
+
+# Generated
+*.log

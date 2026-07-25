@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application x:Class="JTC.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- Ubuntu font family (Regular / Medium / Bold from google/fonts, UFL).
+                 Listing all three weights in one FontFamily lets WinUI pick by FontWeight.
+                 ms-appx:// path is resolved from the app package root at runtime. -->
+            <FontFamily x:Key="AppFontFamily">ms-appx:///Assets/Fonts/Ubuntu-Regular.ttf#Ubuntu,ms-appx:///Assets/Fonts/Ubuntu-Medium.ttf#Ubuntu,ms-appx:///Assets/Fonts/Ubuntu-Bold.ttf#Ubuntu</FontFamily>
+
+            <!-- Override the default content-control font so buttons, menu items, dialogs,
+                 text inputs — everything derived from ContentControl — pick up Ubuntu
+                 without each control needing an explicit FontFamily. SymbolThemeFontFamily
+                 (Segoe MDL2 Assets) is a separate resource, so icon glyphs are unaffected. -->
+            <FontFamily x:Key="ContentControlThemeFontFamily">ms-appx:///Assets/Fonts/Ubuntu-Regular.ttf#Ubuntu,ms-appx:///Assets/Fonts/Ubuntu-Medium.ttf#Ubuntu,ms-appx:///Assets/Fonts/Ubuntu-Bold.ttf#Ubuntu</FontFamily>
+
+            <!-- TextBlock is not a ContentControl and does not consume ContentControlThemeFontFamily,
+                 so an implicit style is the only global way to route it through Ubuntu. -->
+            <Style TargetType="TextBlock">
+                <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+            </Style>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

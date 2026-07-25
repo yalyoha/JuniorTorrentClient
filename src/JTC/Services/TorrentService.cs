@@ -383,16 +383,32 @@ public sealed class TorrentService : IAsyncDisposable
         catch (Exception ex) { DebugLog.Error("Recheck.Stop", ex); }
 
         DebugLog.Info($"  Recheck: HashCheckAsync(autoStart={wasRunning}) begin");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await manager.HashCheckAsync(autoStart: wasRunning);
+            sw.Stop();
+            LogRecheckThroughput("  Recheck", manager, sw.ElapsedMilliseconds);
             DebugLog.Info($"  Recheck: HashCheckAsync done, state={manager.State}, progress={manager.Progress:F1}%");
         }
         catch (Exception ex)
         {
-            DebugLog.Error("Recheck.HashCheckAsync", ex);
+            sw.Stop();
+            DebugLog.Error($"Recheck.HashCheckAsync (after {sw.ElapsedMilliseconds} ms)", ex);
             throw;
         }
+    }
+
+    // Emits one line summarising how long HashCheckAsync took and the effective throughput.
+    // Recheck speed is disk-bound (read + SHA1) — comparing MB/s across torrents/sessions is
+    // how we tell whether a slow recheck is seek-storm on HDD, CPU-bound SHA1, or something
+    // pathological in MonoTorrent's hashing path.
+    private static void LogRecheckThroughput(string tag, TorrentManager manager, long elapsedMs)
+    {
+        var bytes = manager.Torrent?.Size ?? 0;
+        var mib = bytes / 1024.0 / 1024.0;
+        var mibPerSec = elapsedMs > 0 && bytes > 0 ? mib / (elapsedMs / 1000.0) : 0.0;
+        DebugLog.Info($"{tag}: hashcheck {elapsedMs} ms, {mib:F1} MiB, {mibPerSec:F1} MiB/s");
     }
 
     public async Task RemoveAsync(TorrentManager manager, bool deleteFilesOnDisk)
@@ -720,8 +736,18 @@ public sealed class TorrentService : IAsyncDisposable
             if (attemptNum >= 4)
             {
                 DebugLog.Info($"watchdog '{manager.Torrent?.Name}': attempt {attemptNum}, doing HashCheck before start");
-                try { await manager.HashCheckAsync(autoStart: true); }
-                catch (Exception ex) { DebugLog.Error("watchdog HashCheckAsync", ex); }
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    await manager.HashCheckAsync(autoStart: true);
+                    sw.Stop();
+                    LogRecheckThroughput($"watchdog '{manager.Torrent?.Name}'", manager, sw.ElapsedMilliseconds);
+                }
+                catch (Exception ex)
+                {
+                    sw.Stop();
+                    DebugLog.Error($"watchdog HashCheckAsync (after {sw.ElapsedMilliseconds} ms)", ex);
+                }
             }
             else
             {
@@ -994,7 +1020,10 @@ public sealed class TorrentService : IAsyncDisposable
             DebugLog.Info($"stall watchdog: '{name}' forcing StopAsync + HashCheckAsync");
             try { await m.StopAsync(TimeSpan.FromSeconds(2)); }
             catch (Exception ex) { DebugLog.Error($"stall watchdog Stop '{name}'", ex); }
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             await m.HashCheckAsync(autoStart: true);
+            sw.Stop();
+            LogRecheckThroughput($"stall watchdog: '{name}'", m, sw.ElapsedMilliseconds);
             DebugLog.Info($"stall watchdog: '{name}' recheck done, state={m.State} prog={m.Progress:F1}%");
         }
         catch (Exception ex)

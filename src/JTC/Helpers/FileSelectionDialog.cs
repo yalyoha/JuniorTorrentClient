@@ -102,11 +102,20 @@ public static class FileSelectionDialog
             var row = rows[i];
             var cb = new CheckBox
             {
-                Content = row.Number.ToString(),
+                // Wrap the label in a TextBlock so we can vertically-center it in the
+                // CheckBox's row height — CheckBox.Content as a plain string inherits
+                // the default TextBlock baseline alignment and sits above the tick box
+                // instead of on its center line, which looks off in a compact grid.
+                Content = new TextBlock
+                {
+                    Text = row.Number.ToString(),
+                    VerticalAlignment = VerticalAlignment.Center,
+                },
                 IsChecked = true,
                 MinWidth = 0,
                 Padding = new Thickness(4, 2, 4, 2),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Center,
             };
             // Full name + size in the hover tooltip — number alone can be ambiguous when
             // a torrent has both S01E01.mkv and 01.Subs.srt.
@@ -143,7 +152,13 @@ public static class FileSelectionDialog
             CloseButtonText = "Отмена",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = xamlRoot,
-            FullSizeDesired = true,
+            // FullSizeDesired was on to keep the old row-per-file list readable in long
+            // torrents, but with the new 10-col grid a 25-file torrent = 3 rows and the
+            // dialog stretched to full window height showed both wasted space and a
+            // phantom scrollbar from ContentDialog's own scroll host. Auto-sizing keeps
+            // the dialog snug; long lists still scroll internally via the ScrollViewer's
+            // MaxHeight cap.
+            FullSizeDesired = false,
         };
 
         for (int i = 0; i < rows.Count; i++)

@@ -47,8 +47,11 @@
 Требуется .NET SDK 10 и Inno Setup 6.
 
 ```powershell
-# publish self-contained x64
-dotnet publish src\JTC\JTC.csproj -c Release -r win-x64 --self-contained true
+# publish self-contained x64 — the -p:Platform=x64 is mandatory because the
+# csproj declares <Platforms>x64;ARM64</Platforms>; without it dotnet writes
+# to bin\Release\... while the .iss reads from bin\x64\Release\..., silently
+# packaging stale binaries.
+dotnet publish src\JTC\JTC.csproj -c Release -r win-x64 -p:Platform=x64 --self-contained true
 
 # installer → dist\JTC-vX.Y.Z-setup.exe
 & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer\JTC.iss

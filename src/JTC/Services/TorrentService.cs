@@ -363,9 +363,13 @@ public sealed class TorrentService : IAsyncDisposable
         var startState = manager.State;
         DebugLog.Info($"RecheckAsync ENTER name='{name}' state={startState}");
 
+        // Manual "Обновить" on an Error torrent is the user's recovery gesture —
+        // they see red status, click recheck to fix it. Treat Error as "was running"
+        // so autoStart=true after HashCheck; otherwise the torrent would silently
+        // stay Stopped and never come back. Only respect Paused/Stopped as an
+        // intentional user "keep it off" signal.
         var wasRunning = startState is not TorrentState.Stopped
-                                    and not TorrentState.Paused
-                                    and not TorrentState.Error;
+                                    and not TorrentState.Paused;
 
         // HashCheckAsync requires the manager to be in Stopped state. StopAsync with
         // a 2s timeout matches what RemoveAsync uses — enough for one tracker round,

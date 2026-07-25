@@ -1,11 +1,11 @@
 ; Inno Setup script for Junior Torrent Client (JTC)
 ; Compile with: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\JTC.iss
-; Output: dist\JTC-v0.7.0-setup.exe
+; Output: dist\JTC-v0.7.1-setup.exe
 
 #define MyAppName "Junior Torrent Client"
 #define MyAppShortName "JTC"
 #define MyAppFolderName "JuniorTorrentClient"
-#define MyAppVersion "0.7.0"
+#define MyAppVersion "0.7.1"
 #define MyAppPublisher "yalyoha"
 #define MyAppURL "https://github.com/yalyoha/JuniorTorrentClient"
 #define MyAppExeName "JTC.exe"

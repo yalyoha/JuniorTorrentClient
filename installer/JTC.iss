@@ -9,7 +9,7 @@
 #define MyAppPublisher "yalyoha"
 #define MyAppURL "https://github.com/yalyoha/JuniorTorrentClient"
 #define MyAppExeName "JTC.exe"
-#define MyAppSourceDir "..\src\JTC\bin\Release\net10.0-windows10.0.19041.0\win-x64\publish"
+#define MyAppSourceDir "..\src\JTC\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\publish"
 
 [Setup]
 ; Unique GUID — do not change once released (identifies the app in "Programs and Features").

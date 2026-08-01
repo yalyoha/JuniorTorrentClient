@@ -9,9 +9,6 @@ dist/
 *.user
 *.suo
 
-# Local secrets
-bot.txt
-
 # Generated
 *.log
 /.env

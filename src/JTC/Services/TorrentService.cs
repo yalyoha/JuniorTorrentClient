@@ -637,7 +637,8 @@ public sealed class TorrentService : IAsyncDisposable
         if (manager is not null)
         {
             var progNow = manager.Progress;
-            DebugLog.Info($"state '{ShortName(manager.Torrent?.Name)}': {e.OldState} → {e.NewState} (prog={progNow:F1}%)");
+            var partialNow = manager.PartialProgress;
+            DebugLog.Info($"state '{ShortName(manager.Torrent?.Name)}': {e.OldState} → {e.NewState} (prog={progNow:F1}% partial={partialNow:F1}%)");
         }
 
         // A successful re-entry into a downloading state means the previous retry cycle
@@ -795,6 +796,10 @@ public sealed class TorrentService : IAsyncDisposable
         var down = m.Monitor.DownloadRate;
         var up = m.Monitor.UploadRate;
         var progress = m.Progress;
+        // PartialProgress can differ from Progress when files are DoNotDownload
+        // (partial file selection); log both so we can tell "wanted 100 % but overall
+        // 40 %" apart from "wanted 40 % still downloading" in post-mortems.
+        var partialProgress = m.PartialProgress;
 
         // Peers.Available = known-but-not-currently-connected peers from tracker/DHT/PeX.
         // OpenConnections = TCP sockets currently established. Both matter: connections
@@ -834,7 +839,7 @@ public sealed class TorrentService : IAsyncDisposable
         catch { }
 
         DebugLog.Info(
-            $"DIAG '{name}' state={state} prog={progress:F1}% " +
+            $"DIAG '{name}' state={state} prog={progress:F1}% partial={partialProgress:F1}% " +
             $"D={Formatting.RateToHuman(down)} U={Formatting.RateToHuman(up)} " +
             $"conn={open} peers(avail/seeds/leech)={available}/{seeds}/{leechs} " +
             $"trackers={trackerOk}/{trackerTiers} dht={dhtState}");
@@ -851,6 +856,12 @@ public sealed class TorrentService : IAsyncDisposable
     // pulls progress a fraction below 100). 99.0 % over 3 consecutive ticks (~90 s) means
     // several MB missing that MonoTorrent won't try to fetch. Anything closer to 100 % is
     // more likely to be legitimate.
+    //
+    // NB: this is measured against PartialProgress (progress across the "wanted" pieces
+    // only) — Progress counts DoNotDownload files too, so a partial-selection torrent
+    // whose wanted files are all done would perpetually read <99 % on plain Progress and
+    // trigger an endless recheck loop (v0.7.4 → v0.7.5 bug: torrents with partial file
+    // selection never finished, hashcheck flapped every ~90 s).
     private const double PhantomSeedingProgressCutoff = 99.0;
     private const int PhantomSeedingHitsRequired = 3;
 
@@ -987,7 +998,8 @@ public sealed class TorrentService : IAsyncDisposable
             _stallHits.Remove(m);
             return;
         }
-        var progress = m.Progress;
+        // PartialProgress, not Progress — see PhantomSeedingProgressCutoff comment.
+        var progress = m.PartialProgress;
         if (progress >= PhantomSeedingProgressCutoff)
         {
             _stallHits.Remove(m);
@@ -1000,7 +1012,7 @@ public sealed class TorrentService : IAsyncDisposable
         hits++;
         _stallHits[m] = hits;
         var name = ShortName(m.Torrent?.Name);
-        DebugLog.Info($"stall watchdog: '{name}' phantom Seeding (prog={progress:F1}%, hit {hits}/{PhantomSeedingHitsRequired})");
+        DebugLog.Info($"stall watchdog: '{name}' phantom Seeding (partial={progress:F1}%, hit {hits}/{PhantomSeedingHitsRequired})");
 
         if (hits < PhantomSeedingHitsRequired) return;
         _stallHits.Remove(m);

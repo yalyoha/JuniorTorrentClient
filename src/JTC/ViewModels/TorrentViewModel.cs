@@ -98,8 +98,16 @@ public sealed partial class TorrentViewModel : ObservableObject
         // Set Progress before ApplyDisplay so OnProgressChanged fires against the
         // fresh Progress value; when the state also changes, ApplyDisplay's own
         // RebuildRowBackground picks up the new state with the already-fresh progress.
-        Progress = Manager.Progress;
-        ProgressText = $"{Manager.Progress:F1}%";
+        //
+        // PartialProgress, not Progress: with DoNotDownload files (user picked a subset
+        // of episodes at add time) Progress never reaches 100 % — the unselected files
+        // count in the denominator — so the row's progress bar would stall mid-way and
+        // the torrent would visibly look "unfinished" even after every wanted byte is on
+        // disk. PartialProgress rescales to the wanted-pieces-only set, matching what
+        // MonoTorrent uses internally to flip to Seeding.
+        var partial = Manager.PartialProgress;
+        Progress = partial;
+        ProgressText = $"{partial:F1}%";
         DownloadRateText = Formatting.RateToHuman(Manager.Monitor.DownloadRate);
         UploadRateText = Formatting.RateToHuman(Manager.Monitor.UploadRate);
         // MonoTorrent tracks known-from-tracker/DHT/PeX counts here. Both fields exist
@@ -196,6 +204,10 @@ public sealed partial class TorrentViewModel : ObservableObject
         // torrent — the bug looks like a UI glitch. Keep the progress tint visible while
         // prog < 99.9 % so incomplete "Seeding" is at least honest about what's downloaded.
         // TorrentService's stall-watchdog handles the recovery side of this.
+        //
+        // Progress here is PartialProgress (see Refresh), so a legitimately-complete
+        // partial-selection torrent (user picked 5 of 20 episodes, all 5 done) reads
+        // ≥ 99.9 and the fill clears correctly.
         var fill = (_current == Display.Seeding && Progress >= 99.9)
             ? bg
             : RowBrushes.CompositeOver(bg, statusColor, 0.25);

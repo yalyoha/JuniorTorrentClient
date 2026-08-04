@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using JTC.Services;
 
 namespace JTC.Helpers;
@@ -10,16 +11,19 @@ namespace JTC.Helpers;
 /// unchecked files are added with Priority.DoNotDownload so MonoTorrent skips their pieces
 /// (except the ones shared across piece boundaries with kept files).
 ///
-/// Layout is a compact numbered grid ("[ ] 1  [ ] 2  [ ] 3 …") — the usage pattern here
-/// is almost always TV-show torrents where users pick by episode number and don't care
-/// about the identical repeated title text. Full path + size still live in the hover
-/// tooltip for cases where the number alone is ambiguous.
+/// Layout: one row per file — [checkbox] [episode number badge] [file name] [size].
+/// The number badge is a courtesy for TV-show torrents (files sort by extracted episode
+/// number when a series pattern matches); the filename is always visible so game/software
+/// torrents (where "01" / "02" mean nothing) are readable too. Full path lives in the
+/// hover tooltip for cases where a truncated name is ambiguous.
+///
+/// v0.7.1–v0.7.5 shipped a compact numbers-only grid — turned out to be unusable for
+/// non-series torrents (only numbers, no context) — so v0.7.6 brings the name column
+/// back while keeping the episode-sort and the counter/toolbar.
 /// </summary>
 public static class FileSelectionDialog
 {
     public sealed record Entry(int Index, string Path, long Size);
-
-    private const int GridColumns = 10;
 
     // Leading integer with a common separator (dot / space / underscore / dash) so we
     // catch both "19. Название.mkv" and "S01E19 - Name.mkv" via the E19 group below.
@@ -34,8 +38,9 @@ public static class FileSelectionDialog
     {
         // Extract episode number for each file — leading integer wins, then SxxEnn,
         // finally Entry.Index+1 so files without any parseable number still get a
-        // stable label. Then sort by the extracted number so the grid reads 1,2,3…
-        // regardless of the torrent's internal file order.
+        // stable label. Then sort by the extracted number so series torrents read
+        // 1,2,3… regardless of the .torrent's internal file order; for non-series
+        // torrents the fallback = index+1 keeps the order matching the .torrent.
         var rows = files
             .Select(f => new Row(f, ExtractEpisodeNumber(f)))
             .OrderBy(r => r.Number)
@@ -82,54 +87,68 @@ public static class FileSelectionDialog
         toolbar.Children.Add(separator);
         toolbar.Children.Add(counter);
 
-        // Compact numbered grid. GridColumns fixed so wide dialogs don't stretch a
-        // 10-episode row into gargantuan spacing; rows overflow into a ScrollViewer.
-        var grid = new Grid
-        {
-            RowSpacing = 4,
-            ColumnSpacing = 4,
-        };
-        for (int c = 0; c < GridColumns; c++)
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        var rowCount = (rows.Count + GridColumns - 1) / GridColumns;
-        for (int r = 0; r < rowCount; r++)
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
+        // Per-file row. Grid: [checkbox] [number badge] [filename, ellipsis] [size, right].
+        // Kept flat (no ListView / ItemsRepeater) — the list is short (dozens, not
+        // thousands), and a StackPanel of Grids gives us pixel-precise column alignment
+        // without ListViewItem's chrome, focus rectangles, and reveal-brush overhead.
+        var list = new StackPanel { Spacing = 2 };
         var checkboxes = new List<CheckBox>(rows.Count);
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
             var cb = new CheckBox
             {
-                // Wrap the label in a TextBlock so we can vertically-center it in the
-                // CheckBox's row height — CheckBox.Content as a plain string inherits
-                // the default TextBlock baseline alignment and sits above the tick box
-                // instead of on its center line, which looks off in a compact grid.
-                Content = new TextBlock
-                {
-                    Text = row.Number.ToString(),
-                    VerticalAlignment = VerticalAlignment.Center,
-                },
                 IsChecked = true,
                 MinWidth = 0,
-                Padding = new Thickness(4, 2, 4, 2),
-                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Padding = new Thickness(0),
                 VerticalContentAlignment = VerticalAlignment.Center,
             };
-            // Full name + size in the hover tooltip — number alone can be ambiguous when
-            // a torrent has both S01E01.mkv and 01.Subs.srt.
-            ToolTipService.SetToolTip(cb, $"{row.Entry.Path}  ·  {Formatting.BytesToHuman(row.Entry.Size)}");
+            var numText = new TextBlock
+            {
+                Text = row.Number.ToString(),
+                Width = 32,
+                TextAlignment = TextAlignment.Right,
+                Opacity = 0.55,
+                VerticalAlignment = VerticalAlignment.Center,
+                FontFamily = new FontFamily("Consolas"),
+            };
+            var nameText = new TextBlock
+            {
+                Text = System.IO.Path.GetFileName(row.Entry.Path),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var sizeText = new TextBlock
+            {
+                Text = Formatting.BytesToHuman(row.Entry.Size),
+                Opacity = 0.7,
+                TextAlignment = TextAlignment.Right,
+                MinWidth = 80,
+                VerticalAlignment = VerticalAlignment.Center,
+                FontSize = 12,
+            };
 
-            Grid.SetRow(cb, i / GridColumns);
-            Grid.SetColumn(cb, i % GridColumns);
-            grid.Children.Add(cb);
+            var rowGrid = new Grid { ColumnSpacing = 8 };
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Grid.SetColumn(cb,       0); rowGrid.Children.Add(cb);
+            Grid.SetColumn(numText,  1); rowGrid.Children.Add(numText);
+            Grid.SetColumn(nameText, 2); rowGrid.Children.Add(nameText);
+            Grid.SetColumn(sizeText, 3); rowGrid.Children.Add(sizeText);
+
+            // Full path (relative to torrent root) + size in the hover tooltip — the
+            // visible name may be trimmed and won't reveal the containing folder.
+            ToolTipService.SetToolTip(rowGrid, $"{row.Entry.Path}  ·  {Formatting.BytesToHuman(row.Entry.Size)}");
+
+            list.Children.Add(rowGrid);
             checkboxes.Add(cb);
         }
 
         var scroll = new ScrollViewer
         {
-            Content = grid,
+            Content = list,
             MinHeight = 120,
             MaxHeight = 460,
             HorizontalScrollMode = ScrollMode.Disabled,
@@ -138,7 +157,7 @@ public static class FileSelectionDialog
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
 
-        var content = new StackPanel { MinWidth = 520, MaxWidth = 720, Spacing = 4 };
+        var content = new StackPanel { MinWidth = 640, MaxWidth = 900, Spacing = 4 };
         content.Children.Add(titleBlock);
         content.Children.Add(summaryBlock);
         content.Children.Add(toolbar);
@@ -152,12 +171,8 @@ public static class FileSelectionDialog
             CloseButtonText = "Отмена",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = xamlRoot,
-            // FullSizeDesired was on to keep the old row-per-file list readable in long
-            // torrents, but with the new 10-col grid a 25-file torrent = 3 rows and the
-            // dialog stretched to full window height showed both wasted space and a
-            // phantom scrollbar from ContentDialog's own scroll host. Auto-sizing keeps
-            // the dialog snug; long lists still scroll internally via the ScrollViewer's
-            // MaxHeight cap.
+            // Auto-size — long file lists scroll internally via the ScrollViewer's
+            // MaxHeight cap; short lists don't waste the whole window height.
             FullSizeDesired = false,
         };
 

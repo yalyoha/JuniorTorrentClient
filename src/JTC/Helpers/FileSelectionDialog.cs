@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using JTC.Services;
+using DependencyObject = Microsoft.UI.Xaml.DependencyObject;
 
 namespace JTC.Helpers;
 
@@ -162,12 +163,18 @@ public static class FileSelectionDialog
             // episode", nothing happened, they'd press Download, and every file
             // (checkboxes all still default-checked) would download. Making the row
             // itself act like a big checkbox target eliminates that footgun.
+            //
+            // OriginalSource on a tap inside the CheckBox is one of the template
+            // internals (Border/Rectangle/Grid), NOT the CheckBox itself — so a naive
+            // `is CheckBox` guard misses and we double-toggle, netting no change (this
+            // was the v0.7.8 checkbox regression). Walk the visual tree upward instead:
+            // if any ancestor of the tap target is the CheckBox, let the CheckBox
+            // handle its own click and skip our row toggle.
             var capturedCb = cb;
             rowGrid.Tapped += (_, args) =>
             {
-                // Skip when the tap hit the checkbox itself — otherwise we'd toggle
-                // twice (once from the CheckBox, once from us).
-                if (args.OriginalSource is CheckBox) return;
+                if (IsInsideVisualTreeOf(args.OriginalSource as DependencyObject, capturedCb))
+                    return;
                 capturedCb.IsChecked = !(capturedCb.IsChecked ?? false);
                 args.Handled = true;
             };
@@ -270,6 +277,19 @@ public static class FileSelectionDialog
             if (!row.IsSelected)
                 skip.Add(row.Entry.Path);
         return skip;
+    }
+
+    // Walks the visual tree upward from `node` looking for `target`. Used to detect
+    // taps that landed inside a CheckBox's internal template — those must NOT trigger
+    // our whole-row-click handler or we'd double-toggle with the CheckBox's own Click.
+    private static bool IsInsideVisualTreeOf(DependencyObject? node, DependencyObject target)
+    {
+        while (node is not null)
+        {
+            if (ReferenceEquals(node, target)) return true;
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+        return false;
     }
 
     private static int ExtractEpisodeNumber(Entry entry)

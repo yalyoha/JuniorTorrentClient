@@ -180,36 +180,57 @@ public static class FileSelectionDialog
             checkboxes.Add(cb);
         }
 
+        // Compute an outer-dialog envelope that always fits inside the current window.
+        // WinUI 3 ContentDialog renders as a top-level popup positioned over the XamlRoot,
+        // but it does NOT clip itself to XamlRoot bounds — if the inner content is wider
+        // than ContentDialogMaxWidth (theme default ~548), the dialog stretches to fit
+        // the content and any excess spills past the window edges (which the OS then
+        // clips, producing the "title cut on the left, files cut on the right" look).
+        //
+        // Fix: constrain the outer envelope via ContentDialogMax(Width|Height) resources
+        // AND cap the inner content width so it never exceeds that envelope.
+        double envelopeWidth  = 460;
+        double envelopeHeight = 600;
+        try
+        {
+            var rootSize = xamlRoot.Size;
+            if (rootSize.Width  > 0) envelopeWidth  = Math.Clamp(rootSize.Width  - 64, 320, 900);
+            if (rootSize.Height > 0) envelopeHeight = Math.Clamp(rootSize.Height - 64, 320, 900);
+        }
+        catch { /* xamlRoot.Size can throw during teardown; fall back to defaults above */ }
+
+        // Chrome (border, padding, button strip) eats ~52 px vertical and ~52 px horizontal
+        // inside the outer envelope. Subtract so the content column stays inside the chrome.
+        var contentWidth  = Math.Max(280, envelopeWidth  - 52);
+        // Rows plus title+summary+toolbar ~= 100 px overhead; leave the rest for the scroll.
+        var listMaxHeight = Math.Max(160, envelopeHeight - 220);
+
         var scroll = new ScrollViewer
         {
             Content = list,
             MinHeight = 120,
-            MaxHeight = 460,
+            MaxHeight = listMaxHeight,
             HorizontalScrollMode = ScrollMode.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollMode = ScrollMode.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
 
-        // Adaptive width: pick a value that fits the current window with breathing room.
-        // The prior fixed MinWidth=640 exceeded narrow windows and got clipped at both
-        // edges by the OS popup layer (title cut on the left, size column cut on the right).
-        // We size to ~90% of the XamlRoot width, clamped to a comfortable range so the
-        // dialog is compact on small windows and doesn't stretch absurdly wide on 4K.
-        double target = 460;
-        try
-        {
-            var rootWidth = xamlRoot.Size.Width;
-            if (rootWidth > 0)
-                target = Math.Clamp(rootWidth * 0.90 - 48, 320, 720);
-        }
-        catch { /* xamlRoot.Size can throw during teardown; fall back to 460 */ }
-
-        var content = new StackPanel { Width = target, Spacing = 4 };
+        var content = new StackPanel { Width = contentWidth, Spacing = 4 };
         content.Children.Add(titleBlock);
         content.Children.Add(summaryBlock);
         content.Children.Add(toolbar);
         content.Children.Add(scroll);
+
+        // ContentDialog wraps Content in its own ContentScrollViewer (see the WinUI 3
+        // default template). That outer viewer defaults to HorizontalScrollMode=Auto,
+        // so if the inner content ever exceeds its width (even by a pixel from padding
+        // rounding) the user sees a horizontal scrollbar and can drag the whole file
+        // list sideways. Attached-property override kills that behaviour at the source.
+        ScrollViewer.SetHorizontalScrollMode(content, ScrollMode.Disabled);
+        ScrollViewer.SetHorizontalScrollBarVisibility(content, ScrollBarVisibility.Disabled);
+        ScrollViewer.SetVerticalScrollMode(content, ScrollMode.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(content, ScrollBarVisibility.Auto);
 
         var dialog = new ContentDialog
         {
@@ -219,10 +240,14 @@ public static class FileSelectionDialog
             CloseButtonText = "Отмена",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = xamlRoot,
-            // Auto-size — long file lists scroll internally via the ScrollViewer's
-            // MaxHeight cap; short lists don't waste the whole window height.
             FullSizeDesired = false,
         };
+        // Override the ContentDialog theme resources so the OUTER envelope respects the
+        // current window size. Without these two lines, the dialog can size itself past
+        // the window on the width axis (see comment above) and can also exceed the window
+        // height in windowed mode — cutting off the bottom episodes with no scrollbar.
+        dialog.Resources["ContentDialogMaxWidth"]  = envelopeWidth;
+        dialog.Resources["ContentDialogMaxHeight"] = envelopeHeight;
 
         for (int i = 0; i < rows.Count; i++)
         {

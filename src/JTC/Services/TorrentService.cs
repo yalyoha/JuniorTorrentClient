@@ -170,6 +170,16 @@ public sealed class TorrentService : IAsyncDisposable
             AutoSaveLoadDhtCache = true,         // remember DHT nodes across restarts
             AutoSaveLoadFastResume = true,       // skip full re-hash on restart
             AutoSaveLoadMagnetLinkMetadata = true, // cache magnet metadata
+            // Incomplete files get ".!mt" appended, MonoTorrent removes the suffix once
+            // the file is complete. Serves two purposes here:
+            //   1) During download the user can tell at a glance which files are still
+            //      partial (matches qBittorrent's default).
+            //   2) Files that are set to DoNotDownload but received piece-boundary bytes
+            //      (unavoidable when a wanted file shares a piece with an unwanted file)
+            //      keep the ".!mt" suffix forever — our post-completion cleanup pass
+            //      (see CleanupSkippedFilesAsync) uses that as the signal to delete
+            //      them so the user doesn't see phantom half-files in the folder.
+            UsePartialFiles = true,
         }.ToSettings());
 
         // First tick after 15 s so we skip the noisy startup burst; subsequent ticks
@@ -1120,8 +1130,61 @@ public sealed class TorrentService : IAsyncDisposable
             sw.Stop();
             LogRecheckThroughput($"auto-verify '{name}'", m, sw.ElapsedMilliseconds);
             DebugLog.Info($"auto-verify '{name}': done, state={m.State} prog={m.Progress:F1}% partial={m.PartialProgress:F1}%");
+
+            // Post-verify cleanup: BitTorrent pieces are the atomic unit, so when a
+            // wanted file shares a piece with an unwanted (DoNotDownload) file, the
+            // shared piece gets downloaded and its bytes land in the unwanted file
+            // too. Users see phantom "half-files" in the download folder (e.g. episode
+            // 10 shows up because it borders episode 11 which was actually wanted).
+            //
+            // With UsePartialFiles=true those unwanted files stay named "…foo.!mt" —
+            // MonoTorrent only removes the suffix once the file is fully complete,
+            // and DoNotDownload files never complete. We delete them here so the
+            // download folder shows only the files the user actually selected.
+            //
+            // Cost: we lose the ability to seed the small handful of boundary pieces
+            // that spanned unwanted files. All pieces fully inside wanted files still
+            // seed normally. Fair trade for a clean folder.
+            try { CleanupSkippedFiles(m); }
+            catch (Exception ex) { DebugLog.Error($"auto-verify cleanup '{name}'", ex); }
         }
         catch (Exception ex) { DebugLog.Error($"auto-verify '{name}'", ex); }
+    }
+
+    // Post-completion sweep — see the CleanupSkippedFiles comment in TryAutoVerifyAsync
+    // above. Runs synchronously (all file operations, no awaits) so the caller's
+    // stopwatch / logging isn't muddled with async continuation timing.
+    private static void CleanupSkippedFiles(TorrentManager m)
+    {
+        var files = m.Files;
+        if (files is null || files.Count == 0) return;
+        var deleted = 0;
+        foreach (var f in files)
+        {
+            if (f.Priority != Priority.DoNotDownload) continue;
+            // MonoTorrent's ITorrentManagerFile.FullPath is what appears in the
+            // download folder. With UsePartialFiles=true the actual on-disk name is
+            // either FullPath (complete file) or FullPath + ".!mt" (partial). For a
+            // DoNotDownload file we expect the .!mt variant (piece-boundary bytes
+            // only, never completes), but check both for robustness.
+            TryDeleteQuietly(f.FullPath + ".!mt", ref deleted);
+            TryDeleteQuietly(f.FullPath,           ref deleted);
+        }
+        if (deleted > 0)
+            DebugLog.Info($"auto-verify cleanup '{ShortName(m.Torrent?.Name)}': deleted {deleted} skipped-file leftover(s)");
+    }
+
+    private static void TryDeleteQuietly(string path, ref int counter)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                counter++;
+            }
+        }
+        catch (Exception ex) { DebugLog.Error($"cleanup delete {path}", ex); }
     }
 
     // Force a hash recheck to reset MonoTorrent's stale bitfield: Stop, HashCheck, autoStart.

@@ -379,7 +379,7 @@ public sealed partial class MainWindow : Window
         // which files to actually download. Parse the .torrent locally first — this doesn't
         // engage the engine and won't create a manager, so a Cancel here leaves no state
         // behind. Single-file torrents skip the dialog entirely (nothing to choose).
-        IReadOnlySet<int>? skipIndices = null;
+        IReadOnlySet<string>? skipPaths = null;
         try
         {
             var parsed = await MonoTorrent.Torrent.LoadAsync(torrentPath);
@@ -391,7 +391,7 @@ public sealed partial class MainWindow : Window
                 var selection = await FileSelectionDialog.ShowAsync(Content.XamlRoot, parsed.Name, entries);
                 if (selection is null)
                     return; // user cancelled
-                skipIndices = selection;
+                skipPaths = selection;
             }
         }
         catch (Exception ex)
@@ -403,7 +403,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            await _service.AddTorrentFileAsync(torrentPath, downloadDir, startImmediately: true, skipIndices);
+            await _service.AddTorrentFileAsync(torrentPath, downloadDir, startImmediately: true, skipPaths);
         }
         catch (Exception ex)
         {
@@ -1240,6 +1240,16 @@ public sealed partial class MainWindow : Window
             IsChecked = current.AutoUpdateEnabled,
         };
 
+        // Auto-verify on completion. Default ON — after Downloading→Seeding, wait a short
+        // grace, then run a full HashCheck. Missing/mismatched pieces re-enter the queue
+        // automatically so the user doesn't have to right-click "Обновить" when a video
+        // turns out to be truncated. OFF = old behaviour, manual verify only.
+        var autoVerifyChk = new Microsoft.UI.Xaml.Controls.CheckBox
+        {
+            Content = "Проверять хеш после завершения (авто-Обновить)",
+            IsChecked = current.AutoVerifyOnComplete,
+        };
+
         // "Оформление" section — theme-independent shape controls (buttons + rows).
         var buttonRadiusHeader = new TextBlock { Opacity = 0.85, Margin = new Thickness(0, 0, 0, 2) };
         void SyncButtonRadiusHeader() =>
@@ -1312,6 +1322,7 @@ public sealed partial class MainWindow : Window
         outerPanel.Children.Add(maxBox);
         outerPanel.Children.Add(themeBox);
         outerPanel.Children.Add(autoUpdateChk);
+        outerPanel.Children.Add(autoVerifyChk);
         outerPanel.Children.Add(appearanceSection);
         outerPanel.Children.Add(coloredSection);
 
@@ -1610,6 +1621,7 @@ public sealed partial class MainWindow : Window
             StatusErrorHex       = ThemeHelper.ToHex(workingStatusError),
             CustomPresets        = workingPresets,
             AutoUpdateEnabled    = autoUpdateChk.IsChecked ?? true,
+            AutoVerifyOnComplete = autoVerifyChk.IsChecked ?? true,
             ButtonCornerRadius   = workingButtonRadius,
             PlashkaCornerRadius  = workingPlashkaRadius,
             StatusIndicatorStyle = workingIndicatorStyle,

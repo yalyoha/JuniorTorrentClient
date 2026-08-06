@@ -90,6 +90,13 @@ public sealed class TorrentService : IAsyncDisposable
     // CheckAsync on a large torrent can take minutes).
     private readonly HashSet<TorrentManager> _stallRecheckInProgress = new();
 
+    // Torrents that have already had an auto-verify pass run for the current session.
+    // Prevents an infinite loop: post-verify HashCheck fixes missing pieces, torrent
+    // finishes Downloading again, re-enters Seeding — without this guard it would kick
+    // off another verify, another download, another verify… Keyed by manager reference
+    // so removing + re-adding a torrent DOES trigger a fresh verify (fresh manager).
+    private readonly HashSet<TorrentManager> _autoVerifyDone = new();
+
     // Consecutive "stuck Downloading" hit counter — Downloading state with near-zero rate
     // despite the peer pool being non-empty. When we hit the threshold we trigger a
     // tracker + DHT re-announce to try to grow the pool with fresher addresses (the
@@ -211,9 +218,9 @@ public sealed class TorrentService : IAsyncDisposable
 
     public async Task<TorrentManager> AddTorrentFileAsync(
         string torrentPath, string downloadDir, bool startImmediately,
-        IReadOnlySet<int>? skipFileIndices = null)
+        IReadOnlySet<string>? skipFilePaths = null)
     {
-        DebugLog.Info($"AddTorrentFileAsync ENTER path='{torrentPath}' start={startImmediately} skip={skipFileIndices?.Count ?? 0}");
+        DebugLog.Info($"AddTorrentFileAsync ENTER path='{torrentPath}' start={startImmediately} skip={skipFilePaths?.Count ?? 0}");
         if (!File.Exists(torrentPath))
             throw new FileNotFoundException("Torrent file not found", torrentPath);
         Directory.CreateDirectory(downloadDir);
@@ -236,8 +243,8 @@ public sealed class TorrentService : IAsyncDisposable
             // never touches their pieces. Setting priority after Start is fine too (MonoTorrent
             // re-evaluates on next pick) but pre-Start avoids a brief window where the engine
             // could allocate slots to a file the user doesn't want.
-            if (skipFileIndices is { Count: > 0 })
-                await ApplySkipFilePrioritiesAsync(manager, skipFileIndices);
+            if (skipFilePaths is { Count: > 0 })
+                await ApplySkipFilePrioritiesAsync(manager, skipFilePaths);
 
             _persistedByManager[manager] = new PersistedTorrent
             {
@@ -245,11 +252,10 @@ public sealed class TorrentService : IAsyncDisposable
                 SourceKind = PersistedSourceKind.TorrentFile,
                 DownloadDir = downloadDir,
                 Paused = !startImmediately,
-                // Persist skip selection so a restart of the app doesn't quietly re-enable
-                // download of files the user explicitly excluded. Normalise to a sorted
-                // int[] so the JSON diff is stable and predictable.
-                SkipFileIndices = skipFileIndices is { Count: > 0 }
-                    ? skipFileIndices.OrderBy(i => i).ToArray()
+                // Persist by PATH — indices used to drift between builds/torrent versions.
+                // Sort for a stable JSON diff so torrents.json doesn't churn.
+                SkipFilePaths = skipFilePaths is { Count: > 0 }
+                    ? skipFilePaths.OrderBy(p => p, StringComparer.Ordinal).ToArray()
                     : null,
             };
             TorrentAdded?.Invoke(this, manager);
@@ -263,21 +269,31 @@ public sealed class TorrentService : IAsyncDisposable
         finally { _mutation.Release(); DebugLog.Info("  Add: semaphore released"); }
     }
 
-    private static async Task ApplySkipFilePrioritiesAsync(TorrentManager manager, IReadOnlySet<int> skipIndices)
+    private static async Task ApplySkipFilePrioritiesAsync(TorrentManager manager, IReadOnlySet<string> skipPaths)
     {
         var files = manager.Files;
         if (files is null) return;
         var count = 0;
+        var notFound = new List<string>();
         for (int i = 0; i < files.Count; i++)
         {
-            if (!skipIndices.Contains(i)) continue;
+            var f = files[i];
+            if (!skipPaths.Contains(f.Path)) continue;
             try
             {
-                await manager.SetFilePriorityAsync(files[i], Priority.DoNotDownload);
+                await manager.SetFilePriorityAsync(f, Priority.DoNotDownload);
                 count++;
             }
-            catch (Exception ex) { DebugLog.Error($"skip file [{i}] {files[i].Path}", ex); }
+            catch (Exception ex) { DebugLog.Error($"skip file [{i}] {f.Path}", ex); }
         }
+        // Detect any requested path that didn't match a manager.Files entry — signals a
+        // torrent-parse vs. manager-list discrepancy we haven't seen yet. Cheap to log
+        // and diagnostic-only.
+        var managerPaths = new HashSet<string>(files.Select(f => f.Path), StringComparer.Ordinal);
+        foreach (var p in skipPaths)
+            if (!managerPaths.Contains(p)) notFound.Add(p);
+        if (notFound.Count > 0)
+            DebugLog.Info($"  Add: WARNING {notFound.Count} skip paths not found in manager.Files: {string.Join(", ", notFound.Take(3))}{(notFound.Count > 3 ? "..." : "")}");
         DebugLog.Info($"  Add: marked {count}/{files.Count} files as DoNotDownload");
     }
 
@@ -461,6 +477,7 @@ public sealed class TorrentService : IAsyncDisposable
                 _stallRecheckInProgress.Remove(manager);
                 _stuckDownloadHits.Remove(manager);
                 _stuckDownloadCooldownTicks.Remove(manager);
+                _autoVerifyDone.Remove(manager);
                 TorrentRemoved?.Invoke(this, manager);
                 try { await SaveStateAsync(); }
                 catch (Exception ex) { DebugLog.Error("SaveStateAsync in remove finally", ex); }
@@ -500,11 +517,29 @@ public sealed class TorrentService : IAsyncDisposable
                             // files the user excluded at first add. Magnet path stays without
                             // skip support: metadata isn't guaranteed at add time, and the
                             // add API used for magnets doesn't accept the skip set.
-                            IReadOnlySet<int>? skip = null;
-                            if (item.SkipFileIndices is { Length: > 0 })
-                                skip = new HashSet<int>(item.SkipFileIndices);
+                            //
+                            // Prefer SkipFilePaths (path-based, robust). If only the legacy
+                            // SkipFileIndices is present, re-parse the .torrent to translate
+                            // indices → paths. The re-parse cost is one-off per legacy record.
+                            IReadOnlySet<string>? skip = null;
+                            if (item.SkipFilePaths is { Length: > 0 })
+                                skip = new HashSet<string>(item.SkipFilePaths, StringComparer.Ordinal);
+                            else if (item.SkipFileIndices is { Length: > 0 })
+                            {
+                                try
+                                {
+                                    var parsed = await MonoTorrent.Torrent.LoadAsync(item.Source);
+                                    var set = new HashSet<string>(StringComparer.Ordinal);
+                                    foreach (var idx in item.SkipFileIndices)
+                                        if (idx >= 0 && idx < parsed.Files.Count)
+                                            set.Add(parsed.Files[idx].Path);
+                                    if (set.Count > 0) skip = set;
+                                    DebugLog.Info($"Migrated {set.Count} legacy skip indices → paths for '{parsed.Name}'");
+                                }
+                                catch (Exception ex) { DebugLog.Error("legacy skip-index migration", ex); }
+                            }
                             await AddTorrentFileAsync(item.Source, item.DownloadDir,
-                                startImmediately: !item.Paused, skipFileIndices: skip);
+                                startImmediately: !item.Paused, skipFilePaths: skip);
                         }
                         break;
                     case PersistedSourceKind.Magnet:
@@ -654,6 +689,24 @@ public sealed class TorrentService : IAsyncDisposable
         // corrected itself. Counter lives in _stallHits (Dictionary keyed by manager).
         if (manager is not null && e.OldState == TorrentState.Seeding && e.NewState != TorrentState.Seeding)
             _stallHits.Remove(manager);
+
+        // Auto-verify on completion. Downloading → Seeding is MonoTorrent's "download
+        // finished, now seeding" transition — the moment the user considers the torrent
+        // done. Historically the bitfield could report 100% while a piece hadn't actually
+        // been flushed to disk correctly, so the user would open the video and find it
+        // truncated / broken and have to right-click Обновить. This kicks off a background
+        // HashCheck after a short flush grace, catching missing/mismatched pieces before
+        // the user notices. Guarded by _autoVerifyDone so the recovery download → Seeding
+        // cycle doesn't loop, and by the setting so users can opt out.
+        if (manager is not null
+            && e.OldState == TorrentState.Downloading
+            && e.NewState == TorrentState.Seeding
+            && _currentSettings.AutoVerifyOnComplete
+            && !_autoVerifyDone.Contains(manager))
+        {
+            _autoVerifyDone.Add(manager);
+            _ = TryAutoVerifyAsync(manager);
+        }
 
         // Diagnostic: capture Error-state transitions with the underlying cause so post-mortem
         // has a concrete exception to look at instead of just "torrent went red". Done outside
@@ -1017,6 +1070,58 @@ public sealed class TorrentService : IAsyncDisposable
         if (hits < PhantomSeedingHitsRequired) return;
         _stallHits.Remove(m);
         _ = Task.Run(() => TryPhantomSeedingRecheckAsync(m));
+    }
+
+    // Grace period between the Downloading → Seeding transition and the auto-verify pass.
+    // Long enough for MonoTorrent's disk cache to flush and the 45 s fast-resume tick to
+    // run at least once so a mid-verify crash doesn't force a full re-hash on restart.
+    // Short enough that if the last piece is bad, the user sees the recovery start before
+    // they open the file to watch.
+    private static readonly TimeSpan AutoVerifyGrace = TimeSpan.FromSeconds(20);
+
+    // Auto-verify on completion — see comments at the caller in OnManagerStateChanged.
+    // Runs the same StopAsync + HashCheckAsync(autoStart:true) dance as the manual
+    // "Обновить" gesture and the phantom-Seeding watchdog, so all the same guarantees
+    // apply (mutation-safe, autoStart preserves user intent). Bails out cleanly if the
+    // torrent was paused, removed, or manually recheck'd during the grace window.
+    private async Task TryAutoVerifyAsync(TorrentManager m)
+    {
+        var name = ShortName(m.Torrent?.Name);
+        try
+        {
+            DebugLog.Info($"auto-verify '{name}': completion detected, scheduling HashCheck in {AutoVerifyGrace.TotalSeconds:F0}s");
+            await Task.Delay(AutoVerifyGrace);
+
+            // Bail if disposed / removed / user paused during the grace window — the
+            // recheck would be either impossible or unwelcome (e.g. user hit Pause
+            // because they already knew and were investigating).
+            if (_disposed || !_engine.Torrents.Any(t => ReferenceEquals(t, m)))
+            {
+                DebugLog.Info($"auto-verify '{name}': cancelled (disposed or removed)");
+                return;
+            }
+            if (m.State != TorrentState.Seeding)
+            {
+                DebugLog.Info($"auto-verify '{name}': cancelled (state is {m.State}, no longer Seeding)");
+                return;
+            }
+            if (_stallRecheckInProgress.Contains(m))
+            {
+                DebugLog.Info($"auto-verify '{name}': cancelled (stall-watchdog recheck already running)");
+                return;
+            }
+
+            DebugLog.Info($"auto-verify '{name}': StopAsync + HashCheckAsync(autoStart=true)");
+            try { await m.StopAsync(TimeSpan.FromSeconds(2)); }
+            catch (Exception ex) { DebugLog.Error($"auto-verify Stop '{name}'", ex); }
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await m.HashCheckAsync(autoStart: true);
+            sw.Stop();
+            LogRecheckThroughput($"auto-verify '{name}'", m, sw.ElapsedMilliseconds);
+            DebugLog.Info($"auto-verify '{name}': done, state={m.State} prog={m.Progress:F1}% partial={m.PartialProgress:F1}%");
+        }
+        catch (Exception ex) { DebugLog.Error($"auto-verify '{name}'", ex); }
     }
 
     // Force a hash recheck to reset MonoTorrent's stale bitfield: Stop, HashCheck, autoStart.

@@ -31,9 +31,14 @@ public static class FileSelectionDialog
     // Fallback: SxxEnn pattern, take the episode number.
     private static readonly Regex SeasonEpisode = new(@"[Ss]\d+[Ee](\d+)", RegexOptions.Compiled);
 
-    // Returns null if the user cancelled; otherwise the set of file indices to SKIP
-    // (i.e. mark as DoNotDownload). An empty set means "download everything".
-    public static async Task<HashSet<int>?> ShowAsync(
+    // Returns null if the user cancelled; otherwise the set of file paths to SKIP
+    // (i.e. mark as DoNotDownload). Paths are torrent-root-relative and match
+    // ITorrentFile.Path — using paths (not indices) is defensive against MonoTorrent
+    // reordering files in manager.Files vs. the parsed list (e.g. BEP-47 padding
+    // placeholders): index N in parsed.Files is not guaranteed to be the same file
+    // as index N in manager.Files, but Path is unique and stable.
+    // Empty set means "download everything".
+    public static async Task<HashSet<string>?> ShowAsync(
         XamlRoot xamlRoot, string torrentName, IReadOnlyList<Entry> files)
     {
         // Extract episode number for each file — leading integer wins, then SxxEnn,
@@ -51,6 +56,7 @@ public static class FileSelectionDialog
         {
             Text = torrentName,
             TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             FontSize = 14,
         };
@@ -58,6 +64,8 @@ public static class FileSelectionDialog
         var summaryBlock = new TextBlock
         {
             Text = $"{files.Count} файлов · {Formatting.BytesToHuman(totalSize)}",
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap,
             Opacity = 0.75,
             FontSize = 12,
         };
@@ -106,29 +114,40 @@ public static class FileSelectionDialog
             var numText = new TextBlock
             {
                 Text = row.Number.ToString(),
-                Width = 32,
+                Width = 28,
                 TextAlignment = TextAlignment.Right,
                 Opacity = 0.55,
                 VerticalAlignment = VerticalAlignment.Center,
                 FontFamily = new FontFamily("Consolas"),
+                FontSize = 12,
             };
             var nameText = new TextBlock
             {
                 Text = System.IO.Path.GetFileName(row.Entry.Path),
                 TextTrimming = TextTrimming.CharacterEllipsis,
+                TextWrapping = TextWrapping.NoWrap,
                 VerticalAlignment = VerticalAlignment.Center,
+                FontSize = 13,
             };
             var sizeText = new TextBlock
             {
                 Text = Formatting.BytesToHuman(row.Entry.Size),
                 Opacity = 0.7,
                 TextAlignment = TextAlignment.Right,
-                MinWidth = 80,
+                MinWidth = 70,
                 VerticalAlignment = VerticalAlignment.Center,
                 FontSize = 12,
             };
 
-            var rowGrid = new Grid { ColumnSpacing = 8 };
+            var rowGrid = new Grid
+            {
+                ColumnSpacing = 8,
+                // Transparent brush makes the WHOLE row hit-testable — without an
+                // explicit background, Tapped only fires on the child controls (text,
+                // checkbox), leaving big dead zones between columns.
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                Padding = new Thickness(4, 2, 4, 2),
+            };
             rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -137,6 +156,21 @@ public static class FileSelectionDialog
             Grid.SetColumn(numText,  1); rowGrid.Children.Add(numText);
             Grid.SetColumn(nameText, 2); rowGrid.Children.Add(nameText);
             Grid.SetColumn(sizeText, 3); rowGrid.Children.Add(sizeText);
+
+            // Whole-row click toggles the checkbox. Users kept mistaking rows for
+            // selectable list items — they'd click the filename to "select just this
+            // episode", nothing happened, they'd press Download, and every file
+            // (checkboxes all still default-checked) would download. Making the row
+            // itself act like a big checkbox target eliminates that footgun.
+            var capturedCb = cb;
+            rowGrid.Tapped += (_, args) =>
+            {
+                // Skip when the tap hit the checkbox itself — otherwise we'd toggle
+                // twice (once from the CheckBox, once from us).
+                if (args.OriginalSource is CheckBox) return;
+                capturedCb.IsChecked = !(capturedCb.IsChecked ?? false);
+                args.Handled = true;
+            };
 
             // Full path (relative to torrent root) + size in the hover tooltip — the
             // visible name may be trimmed and won't reveal the containing folder.
@@ -157,7 +191,21 @@ public static class FileSelectionDialog
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
 
-        var content = new StackPanel { MinWidth = 640, MaxWidth = 900, Spacing = 4 };
+        // Adaptive width: pick a value that fits the current window with breathing room.
+        // The prior fixed MinWidth=640 exceeded narrow windows and got clipped at both
+        // edges by the OS popup layer (title cut on the left, size column cut on the right).
+        // We size to ~90% of the XamlRoot width, clamped to a comfortable range so the
+        // dialog is compact on small windows and doesn't stretch absurdly wide on 4K.
+        double target = 460;
+        try
+        {
+            var rootWidth = xamlRoot.Size.Width;
+            if (rootWidth > 0)
+                target = Math.Clamp(rootWidth * 0.90 - 48, 320, 720);
+        }
+        catch { /* xamlRoot.Size can throw during teardown; fall back to 460 */ }
+
+        var content = new StackPanel { Width = target, Spacing = 4 };
         content.Children.Add(titleBlock);
         content.Children.Add(summaryBlock);
         content.Children.Add(toolbar);
@@ -192,10 +240,10 @@ public static class FileSelectionDialog
         if (result != ContentDialogResult.Primary)
             return null;
 
-        var skip = new HashSet<int>();
+        var skip = new HashSet<string>(StringComparer.Ordinal);
         foreach (var row in rows)
             if (!row.IsSelected)
-                skip.Add(row.Entry.Index);
+                skip.Add(row.Entry.Path);
         return skip;
     }
 

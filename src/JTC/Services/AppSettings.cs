@@ -218,6 +218,16 @@ public sealed record AppSettings
     // the pre-v0.5.5 4 px vertical bar on the leftmost edge, better paired with a
     // square (PlashkaCornerRadius=0) plashka.
     public StatusIndicatorStyle StatusIndicatorStyle { get; init; } = StatusIndicatorStyle.Circle;
+
+    // v0.7.7+ — automatic post-completion hashcheck. Every time a torrent transitions
+    // Downloading → Seeding for the first time in the current session, we wait a short
+    // grace period (piece writes flush, fast-resume persists), then run a full HashCheck.
+    // If MonoTorrent's bitfield says a piece is present but the on-disk data doesn't
+    // match, HashCheck notices and the missing pieces re-enter the download queue —
+    // the user gets a genuinely-complete torrent without having to right-click "Обновить"
+    // themselves. Missing on pre-v0.7.7 settings.json ⇒ default true so existing users
+    // benefit from the fix without any settings action.
+    public bool AutoVerifyOnComplete { get; init; } = true;
 }
 
 /// <summary>How the per-row status indicator renders — see AppSettings.StatusIndicatorStyle.</summary>

@@ -582,12 +582,25 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async Task DeleteWithConfirmationAsync(List<TorrentViewModel> vms)
     {
+        // Content is a wrapping TextBlock rather than a plain string so long torrent
+        // names lay out on two or three lines instead of getting ellipsis-clipped at
+        // the right edge. Buttons already say "Удалить файлы" / "Оставить файлы", so
+        // the prompt itself just needs to identify WHICH torrent is being deleted —
+        // the old "Также удалить скачанные файлы «…»?" phrase was redundant and it
+        // ate the horizontal room the torrent name needed.
+        var contentText = vms.Count == 1
+            ? $"«{vms[0].Name}»"
+            : $"Выбрано торрентов: {vms.Count}";
+        var contentBlock = new TextBlock
+        {
+            Text = contentText,
+            TextWrapping = TextWrapping.Wrap,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             Title = vms.Count == 1 ? "Удалить торрент" : $"Удалить торренты ({vms.Count})",
-            Content = vms.Count == 1
-                ? $"Также удалить скачанные файлы «{vms[0].Name}»?"
-                : $"Также удалить скачанные файлы для {vms.Count} выбранных торрентов?",
+            Content = contentBlock,
             PrimaryButtonText = "Удалить файлы",
             SecondaryButtonText = "Оставить файлы",
             CloseButtonText = "Отмена",

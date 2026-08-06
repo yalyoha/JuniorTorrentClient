@@ -1,11 +1,11 @@
 ; Inno Setup script for Junior Torrent Client (JTC)
 ; Compile with: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\JTC.iss
-; Output: dist\JTC-v0.7.11-setup.exe
+; Output: dist\JTC-v0.8.1-setup.exe
 
 #define MyAppName "Junior Torrent Client"
 #define MyAppShortName "JTC"
 #define MyAppFolderName "JuniorTorrentClient"
-#define MyAppVersion "0.7.11"
+#define MyAppVersion "0.8.1"
 #define MyAppPublisher "yalyoha"
 #define MyAppURL "https://github.com/yalyoha/JuniorTorrentClient"
 #define MyAppExeName "JTC.exe"
@@ -13,7 +13,6 @@
 
 [Setup]
 ; Unique GUID — do not change once released (identifies the app in "Programs and Features").
-; Same GUID as pre-rebrand, so a user upgrading from a TClient install won't get a duplicate entry.
 AppId={{4F1B7EDF-9D9D-4C88-9E7A-4A3F1E7B2F91}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -27,15 +26,10 @@ PrivilegesRequired=lowest
 DefaultDirName={autopf}\{#MyAppFolderName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-; Ignore the previous InstallLocation / GroupName recorded in the registry.
-; Without these, a machine upgrading from the pre-rebrand "TClient" install would
-; keep installing into %LocalAppData%\Programs\TClient because Inno remembers the old path.
-UsePreviousAppDir=no
-UsePreviousGroup=no
 ; Where the installer .exe goes when built.
 OutputDir=..\dist
 OutputBaseFilename={#MyAppShortName}-v{#MyAppVersion}-setup
-SetupIconFile=..\src\JTC\Assets\tclient.ico
+SetupIconFile=..\src\JTC\Assets\jtc.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -74,16 +68,6 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; sweep is limited to {app} and does not touch downloads or torrent state.
 Type: filesandordirs; Name: "{app}\*"
 
-; Legacy pre-rebrand install (v0.3.5 through v0.3.15 shipped as "TClient"): a fresh
-; upgrade to JTC lands in {autopf}\JuniorTorrentClient because UsePreviousAppDir=no,
-; but Inno leaves the old {autopf}\TClient directory alone since it's a different
-; path. Users who clicked the Start-menu shortcut labelled "TClient" (which still
-; points into that stale dir) would launch the old exe and think the update didn't
-; take. Sweep it here + delete the legacy shortcuts explicitly.
-Type: filesandordirs; Name: "{localappdata}\Programs\TClient"
-Type: files;         Name: "{autoprograms}\TClient.lnk"
-Type: files;         Name: "{autodesktop}\TClient.lnk"
-
 [Files]
 ; The whole publish folder — 400+ WinAppSDK / MonoTorrent / .NET DLLs.
 Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -101,8 +85,8 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
 
 [UninstallDelete]
-; Leave the app data (%LocalAppData%\JTC, and %LocalAppData%\TClient for old installs) alone
-; by default — that's the user's downloads / torrent list. Just remove the install directory.
+; Leave the app data (%LocalAppData%\JTC) alone by default — that's the user's
+; downloads / torrent list. Just remove the install directory.
 Type: filesandordirs; Name: "{app}"
 
 [Code]
@@ -111,8 +95,6 @@ const
   ShutdownTimeout = 10000; // ms
   PollInterval    = 200;
   // AppId + '_is1' — where Inno records per-user install info in the registry.
-  // Same GUID as the pre-rebrand TClient install, so an upgrade from TClient
-  // resolves through this key too.
   UninstallRegKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{4F1B7EDF-9D9D-4C88-9E7A-4A3F1E7B2F91}_is1';
 
 // GetTickCount isn't in Inno 6's built-in Pascal namespace, so import directly
@@ -133,10 +115,9 @@ begin
 end;
 
 // Force-kill by executable name via cmd.exe → taskkill. Used as the fallback path
-// in PrepareToInstall for JTC versions before v0.3.36 (which don't understand the
-// @shutdown marker) and for the pre-rebrand TClient.exe from v0.3.15 and earlier.
-// Torrent state is persisted after every add/remove/pause/resume, so a hard kill
-// loses at most current-second rate stats — same cost as the tray "Выход" path.
+// in PrepareToInstall for old JTC versions (pre-v0.3.36) that don't understand the
+// @shutdown marker. Torrent state is persisted after every add/remove/pause/resume,
+// so a hard kill loses at most current-second rate stats — same cost as tray "Выход".
 procedure ForceKillByName(const ExeName: String);
 var
   ResultCode: Integer;
@@ -152,11 +133,11 @@ end;
 //   1) Graceful — drop the "@shutdown" marker into the inbox. v0.3.36+ picks this
 //      up via FileSystemWatcher and calls Process.Kill from its own app-side
 //      handler, giving TorrentService's dispose logic a chance to run.
-//   2) Force — after 5 s, unconditionally taskkill /F both JTC.exe and legacy
-//      TClient.exe. Handles pre-v0.3.36 installs that never learned about the
-//      marker (their exe would ignore the file and keep running, and the [Files]
-//      copy would then fail to overwrite the locked JTC.dll — user sees a "new
-//      launcher, old code" hybrid). Also catches any wedged teardown edge case.
+//   2) Force — after 5 s, unconditionally taskkill /F JTC.exe. Handles pre-v0.3.36
+//      installs that never learned about the marker (their exe would ignore the
+//      file and keep running, and the [Files] copy would then fail to overwrite the
+//      locked JTC.dll — user sees a "new launcher, old code" hybrid). Also catches
+//      any wedged teardown edge case.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   MarkerDir:  String;
@@ -165,13 +146,7 @@ var
 begin
   Result := '';
   if not CheckForMutexes(JtcMutex) then
-  begin
-    // Mutex not held → JTC not running. Still kill legacy TClient.exe in case
-    // an even older install is around (its mutex name may differ from JtcMutex).
-    ForceKillByName('TClient.exe');
-    Sleep(200);
-    Exit;
-  end;
+    Exit; // Mutex not held → JTC not running, nothing to shut down.
 
   MarkerDir := ExpandConstant('{localappdata}\JTC\inbox');
   if not DirExists(MarkerDir) then
@@ -190,10 +165,8 @@ begin
   end;
 
   // Fallback: force-kill regardless of whether the mutex is still held. The kill
-  // is a no-op if the process already exited via the marker path. Also targets
-  // legacy TClient.exe in case a pre-rebrand install is what's running.
+  // is a no-op if the process already exited via the marker path.
   ForceKillByName('JTC.exe');
-  ForceKillByName('TClient.exe');
   Sleep(500);
 
   // Something is wedged past both graceful and force paths — very unusual. Ask
@@ -205,11 +178,11 @@ end;
 
 // Immediately before the [Files] copy runs, invoke the previous version's uninstaller
 // silently. This guarantees a clean state even when the previous install lived at a
-// different {app} path (pre-rebrand TClient → JuniorTorrentClient, or a user-chosen
-// custom directory that our [InstallDelete] sweep can't know about). Inno records the
-// path to unins*.exe in HKCU under the AppId — we look it up, run it with silent
-// switches, then let the normal install proceed. Failure here is non-fatal: the
-// [InstallDelete] sweep is a fallback for anything the old uninstaller missed.
+// user-chosen custom directory that our [InstallDelete] sweep can't know about. Inno
+// records the path to unins*.exe in HKCU under the AppId — we look it up, run it
+// with silent switches, then let the normal install proceed. Failure here is
+// non-fatal: the [InstallDelete] sweep is a fallback for anything the old uninstaller
+// missed.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   UninstallExe: String;

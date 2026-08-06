@@ -20,12 +20,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <AssemblyName>JTC</AssemblyName>
-    <ApplicationIcon>Assets\tclient.ico</ApplicationIcon>
-    <Version>0.7.11</Version>
+    <ApplicationIcon>Assets\jtc.ico</ApplicationIcon>
+    <Version>0.8.1</Version>
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="Assets\tclient.ico">
+    <Content Include="Assets\jtc.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Assets\Fonts\*.ttf">

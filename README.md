@@ -6,7 +6,7 @@
 > взявший C#, сядет писать десктопное приложение с [Claude](https://claude.ai)
 > в паре».
 
-**Текущая версия:** [v0.7.11](https://github.com/yalyoha/JuniorTorrentClient/releases/latest)
+**Текущая версия:** [v0.8.1](https://github.com/yalyoha/JuniorTorrentClient/releases/latest)
 
 ---
 
@@ -124,7 +124,7 @@ Alan McGovern: кроссплатформенная open-source библиоте
   контекстное меню.
 - **Установщик Inno Setup** с graceful shutdown работающего клиента через
   маркер `@shutdown` (и `taskkill /F` как fallback). Не оставляет
-  залоченных файлов, чистит легаси-инсталляцию под старым именем `TClient`.
+  залоченных файлов.
 - **Автообновление** — фоновая проверка GitHub Releases, тихая установка
   с автозапуском после копирования. Можно отключить.
 
@@ -153,7 +153,6 @@ Alan McGovern: кроссплатформенная open-source библиоте
 
 - корректно завершает уже запущенный JTC (сначала маркер `@shutdown`, затем
   `taskkill /F` — файлы не остаются заблокированными);
-- сносит устаревшую установку `TClient` (старое имя приложения) и её ярлыки;
 - перезапускает JTC после установки.
 
 При включённом автообновлении (по умолчанию) все последующие релизы
@@ -235,7 +234,7 @@ src/JTC/
 │   ├── SettingsStore.cs        — persist настроек в settings.json
 │   ├── AppSettings.cs          — модель настроек + встроенные цветовые пресеты
 │   ├── PersistedTorrent.cs     — запись в torrents.json
-│   ├── AppPaths.cs             — %LocalAppData%\JTC пути + миграция с TClient
+│   ├── AppPaths.cs             — %LocalAppData%\JTC пути
 │   ├── DebugLog.cs             — файловый лог с ротацией
 │   ├── CloudLogSink.cs         — опциональная отправка логов вовне
 │   └── TorrentRestartPolicy.cs — backoff + fatal-exception classification
@@ -250,8 +249,7 @@ src/JTC/
 tests/JTC.Tests/                — xUnit-тесты (сейчас 39 штук — форматирование
                                   байтов, retry-политика)
 installer/JTC.iss               — Inno Setup 6 скрипт: graceful shutdown,
-                                  чистка легаси TClient, silent-режим для
-                                  автообновления
+                                  silent-режим для автообновления
 icon/                           — исходники иконки (CorelDraw + PNG)
 ```
 

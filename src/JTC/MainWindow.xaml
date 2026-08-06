@@ -18,7 +18,7 @@
         <!-- Tray icon — the app minimizes here on window-close instead of quitting,
              so the torrent engine keeps seeding/leeching in the background. -->
         <tb:TaskbarIcon x:Name="TrayIcon"
-                        IconSource="Assets/tclient.ico"
+                        IconSource="Assets/jtc.ico"
                         ToolTipText="Junior Torrent Client"
                         NoLeftClickDelay="True"
                         MenuActivation="RightClick">

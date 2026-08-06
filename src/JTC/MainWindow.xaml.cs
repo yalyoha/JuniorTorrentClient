@@ -85,7 +85,7 @@ public sealed partial class MainWindow : Window
         InstallMinSizeSubclass();
 
         // Window icon (taskbar + Alt-Tab). The .exe icon is set separately via <ApplicationIcon> in csproj.
-        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "tclient.ico");
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "jtc.ico");
         if (File.Exists(iconPath))
             AppWindow.SetIcon(iconPath);
 

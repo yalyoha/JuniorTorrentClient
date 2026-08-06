@@ -12,7 +12,6 @@ namespace JTC.Services;
 public static class FileAssociation
 {
     private const string ProgId       = "JTC.Torrent";
-    private const string OldProgId    = "TClient.Torrent"; // pre-rebrand — remove on next launch
     private const string FriendlyName = "Файл торрента (JTC)";
     private const string Extension    = ".torrent";
     private const string AppRegName   = "JTC"; // key under HKCU\Software\RegisteredApplications
@@ -29,8 +28,7 @@ public static class FileAssociation
         try
         {
             var exePath = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "JTC.exe");
-            RemoveLegacyProgId();
-            var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "tclient.ico");
+            var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "jtc.ico");
             // Fall back to embedded exe icon if the file asset is missing for any reason.
             var iconRef = File.Exists(iconPath) ? $"\"{iconPath}\",0" : $"\"{exePath}\",0";
             var openCommand = $"\"{exePath}\" \"%1\"";
@@ -162,29 +160,5 @@ public static class FileAssociation
             return false;
         key.SetValue(name, desired, RegistryValueKind.String);
         return true;
-    }
-
-    /// <summary>
-    /// Cleans up the pre-rebrand HKCU registry entries that pointed at TClient.Torrent /
-    /// TClient.exe. Safe if they're absent. Runs on every startup — idempotent.
-    /// </summary>
-    private static void RemoveLegacyProgId()
-    {
-        try
-        {
-            Registry.CurrentUser.DeleteSubKeyTree($@"Software\Classes\{OldProgId}", throwOnMissingSubKey: false);
-            Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Applications\TClient.exe", throwOnMissingSubKey: false);
-            using var owp = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{Extension}\OpenWithProgIds", writable: true);
-            owp?.DeleteValue(OldProgId, throwOnMissingValue: false);
-
-            // If the extension's (default) still points at the removed TClient.Torrent
-            // ProgId, AssocQueryString would resolve to a dead command line and browsers
-            // would silently fail — clear it so our new default write (step 2 in
-            // EnsureRegistered) is what actually takes effect.
-            using var extKey = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{Extension}", writable: true);
-            if (extKey is not null && (extKey.GetValue(null) as string) == OldProgId)
-                extKey.DeleteValue(null, throwOnMissingValue: false);
-        }
-        catch (Exception ex) { DebugLog.Error("RemoveLegacyProgId", ex); }
     }
 }

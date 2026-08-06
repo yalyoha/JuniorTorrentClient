@@ -35,7 +35,7 @@ public partial class App : Application
         DebugLog.Info($"OnLaunched: cliArgs=[{string.Join(" | ", cliArgs)}]");
         DebugLog.Info($"OnLaunched: winui.Arguments='{winuiArgs}'");
 
-        // If another TClient instance is already running, hand off any .torrent arg to it
+        // If another JTC instance is already running, hand off any .torrent arg to it
         // via the inbox file, then bail out. The primary picks it up.
         if (SingleInstance.TryClaimOrHandOff(cliArgs))
         {

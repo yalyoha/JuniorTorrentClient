@@ -6,7 +6,7 @@
 > взявший C#, сядет писать десктопное приложение с [Claude](https://claude.ai)
 > в паре».
 
-**Текущая версия:** [v0.8.1](https://github.com/yalyoha/JuniorTorrentClient/releases/latest)
+**Текущая версия:** [v0.8.2](https://github.com/yalyoha/JuniorTorrentClient/releases/latest)
 
 ---
 

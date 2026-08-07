@@ -134,13 +134,27 @@ public sealed class TorrentService : IAsyncDisposable
             CacheDirectory = AppPaths.CacheDir,
             MaximumConnections = MaxPeerConnections,
             MaximumHalfOpenConnections = MaxHalfOpenConnections,
-            // 128 MB in-memory disk cache (up from 50 MB). Under our typical single-hot-
-            // torrent workload one torrent gets all 500 peer slots — the cache smooths
-            // its bursty piece writes on slower disks (HDDs, SMR drives) and reduces
-            // syscall churn. On SSDs it's still helpful for the read-ahead side of
-            // ReadsAndWrites when we upload to peers.
-            DiskCacheBytes = 128 * 1024 * 1024,
+            // 256 MB in-memory disk cache. Doubled from 128 MB primarily to speed up
+            // hash-check: a bigger read cache means MonoTorrent can keep more of the
+            // current piece + look-ahead in RAM instead of round-tripping to disk for
+            // every SHA-1. On the peer-upload side the extra headroom also smooths
+            // bursty writes on slower/SMR drives.
+            DiskCacheBytes = 256 * 1024 * 1024,
             DiskCachePolicy = MonoTorrent.PieceWriter.CachePolicy.ReadsAndWrites,
+            // MonoTorrent's engine-side default for MaximumOpenFiles is 196, but the
+            // EngineSettingsBuilder default is 20 (!), so building settings via the
+            // builder silently caps us at 20 concurrent open file handles. For a 30-
+            // episode series torrent, hash-check opens/closes each file repeatedly as
+            // it reads pieces that straddle file boundaries — that per-file open cost
+            // (and Windows Defender's real-time-scan hit on each open) dominates the
+            // recheck time. 196 lets MonoTorrent keep every file in a typical series
+            // torrent open for the whole hash-check run.
+            MaximumOpenFiles = 196,
+            // Explicit unlimited disk read rate. Default is 0 (unlimited), but the
+            // property is important enough to pin: on SSD we want the hash-check to
+            // eat the drive's full read bandwidth. If MonoTorrent ever changes the
+            // default we don't want a silent recheck slowdown.
+            MaximumDiskReadRate = 0,
             // Encryption preference: encrypted first, plain-text as fallback.
             // Some ISPs / trackers reject purely-plain-text connections.
             AllowedEncryption = new System.Collections.Generic.List<MonoTorrent.Connections.EncryptionType>
@@ -397,32 +411,85 @@ public sealed class TorrentService : IAsyncDisposable
         var wasRunning = startState is not TorrentState.Stopped
                                     and not TorrentState.Paused;
 
-        // HashCheckAsync requires the manager to be in Stopped state. StopAsync with
-        // a 2s timeout matches what RemoveAsync uses — enough for one tracker round,
-        // but doesn't wall for flaky trackers.
+        // Register in _stallRecheckInProgress so the phantom-Seeding watchdog and
+        // auto-verify skip this manager while our hash-check runs. Without this
+        // guard, a background recheck could kick off in parallel, forcing MonoTorrent
+        // to do the same disk read twice and dragging the user-visible recheck out.
+        if (!_stallRecheckInProgress.Add(manager))
+        {
+            DebugLog.Info($"  Recheck: another hash-check already in progress for '{name}', skipping");
+            return;
+        }
         try
         {
-            DebugLog.Info($"  Recheck: StopAsync (from state={manager.State})");
-            await manager.StopAsync(TimeSpan.FromSeconds(2));
-            DebugLog.Info($"  Recheck: stopped, state={manager.State}");
-        }
-        catch (Exception ex) { DebugLog.Error("Recheck.Stop", ex); }
+            // HashCheckAsync requires the manager to be in Stopped state. StopAsync with
+            // a 2s timeout matches what RemoveAsync uses — enough for one tracker round,
+            // but doesn't wall for flaky trackers.
+            try
+            {
+                DebugLog.Info($"  Recheck: StopAsync (from state={manager.State})");
+                await manager.StopAsync(TimeSpan.FromSeconds(2));
+                DebugLog.Info($"  Recheck: stopped, state={manager.State}");
+            }
+            catch (Exception ex) { DebugLog.Error("Recheck.Stop", ex); }
 
-        DebugLog.Info($"  Recheck: HashCheckAsync(autoStart={wasRunning}) begin");
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+            DebugLog.Info($"  Recheck: HashCheckAsync(autoStart={wasRunning}) begin");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var progressCts = new CancellationTokenSource();
+            var progressTask = LogHashCheckProgressAsync(manager, name, sw, progressCts.Token);
+            try
+            {
+                await manager.HashCheckAsync(autoStart: wasRunning);
+                sw.Stop();
+                LogRecheckThroughput("  Recheck", manager, sw.ElapsedMilliseconds);
+                DebugLog.Info($"  Recheck: HashCheckAsync done, state={manager.State}, progress={manager.Progress:F1}%");
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                DebugLog.Error($"Recheck.HashCheckAsync (after {sw.ElapsedMilliseconds} ms)", ex);
+                throw;
+            }
+            finally
+            {
+                progressCts.Cancel();
+                try { await progressTask; } catch { }
+                progressCts.Dispose();
+            }
+        }
+        finally
+        {
+            _stallRecheckInProgress.Remove(manager);
+        }
+    }
+
+    // Polls hash-check progress every 5 s and writes a log line so we can see whether
+    // a "hangs at 100%" report is a genuine hang or just a long-running check. Reads
+    // TorrentManager.Progress which, during Hashing state, reflects the fraction of
+    // pieces already SHA-hashed; the value only reaches 100 once every piece is done,
+    // regardless of whether the pieces pass or fail. Runs on a background task, cheap
+    // property reads only — never awaits anything that could block MonoTorrent.
+    private static async Task LogHashCheckProgressAsync(
+        TorrentManager m, string name, System.Diagnostics.Stopwatch sw, System.Threading.CancellationToken ct)
+    {
         try
         {
-            await manager.HashCheckAsync(autoStart: wasRunning);
-            sw.Stop();
-            LogRecheckThroughput("  Recheck", manager, sw.ElapsedMilliseconds);
-            DebugLog.Info($"  Recheck: HashCheckAsync done, state={manager.State}, progress={manager.Progress:F1}%");
+            while (!ct.IsCancellationRequested)
+            {
+                try { await Task.Delay(TimeSpan.FromSeconds(5), ct); }
+                catch (TaskCanceledException) { return; }
+                if (ct.IsCancellationRequested) return;
+                try
+                {
+                    // PieceHashedEventArgs.Progress would be more precise but we don't
+                    // want the subscription noise; TorrentManager.Progress is close
+                    // enough for a "still alive" heartbeat.
+                    DebugLog.Info($"  Recheck '{name}': state={m.State} prog={m.Progress:F1}% partial={m.PartialProgress:F1}% (elapsed {sw.Elapsed.TotalSeconds:F0}s)");
+                }
+                catch { }
+            }
         }
-        catch (Exception ex)
-        {
-            sw.Stop();
-            DebugLog.Error($"Recheck.HashCheckAsync (after {sw.ElapsedMilliseconds} ms)", ex);
-            throw;
-        }
+        catch (Exception ex) { DebugLog.Error("Recheck progress poll", ex); }
     }
 
     // Emits one line summarising how long HashCheckAsync took and the effective throughput.
@@ -1115,21 +1182,38 @@ public sealed class TorrentService : IAsyncDisposable
                 DebugLog.Info($"auto-verify '{name}': cancelled (state is {m.State}, no longer Seeding)");
                 return;
             }
-            if (_stallRecheckInProgress.Contains(m))
+            // Register with the same guard-set the phantom-Seeding watchdog + manual
+            // Recheck use — three code paths, one at a time per manager, so they never
+            // fight for the same disk reads.
+            if (!_stallRecheckInProgress.Add(m))
             {
-                DebugLog.Info($"auto-verify '{name}': cancelled (stall-watchdog recheck already running)");
+                DebugLog.Info($"auto-verify '{name}': cancelled (another hash-check already in progress)");
                 return;
             }
+            try
+            {
+                DebugLog.Info($"auto-verify '{name}': StopAsync + HashCheckAsync(autoStart=true)");
+                try { await m.StopAsync(TimeSpan.FromSeconds(2)); }
+                catch (Exception ex) { DebugLog.Error($"auto-verify Stop '{name}'", ex); }
 
-            DebugLog.Info($"auto-verify '{name}': StopAsync + HashCheckAsync(autoStart=true)");
-            try { await m.StopAsync(TimeSpan.FromSeconds(2)); }
-            catch (Exception ex) { DebugLog.Error($"auto-verify Stop '{name}'", ex); }
-
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            await m.HashCheckAsync(autoStart: true);
-            sw.Stop();
-            LogRecheckThroughput($"auto-verify '{name}'", m, sw.ElapsedMilliseconds);
-            DebugLog.Info($"auto-verify '{name}': done, state={m.State} prog={m.Progress:F1}% partial={m.PartialProgress:F1}%");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var progressCts = new CancellationTokenSource();
+                var progressTask = LogHashCheckProgressAsync(m, name, sw, progressCts.Token);
+                try
+                {
+                    await m.HashCheckAsync(autoStart: true);
+                    sw.Stop();
+                    LogRecheckThroughput($"auto-verify '{name}'", m, sw.ElapsedMilliseconds);
+                    DebugLog.Info($"auto-verify '{name}': done, state={m.State} prog={m.Progress:F1}% partial={m.PartialProgress:F1}%");
+                }
+                finally
+                {
+                    progressCts.Cancel();
+                    try { await progressTask; } catch { }
+                    progressCts.Dispose();
+                }
+            }
+            finally { _stallRecheckInProgress.Remove(m); }
 
             // Post-verify cleanup: BitTorrent pieces are the atomic unit, so when a
             // wanted file shares a piece with an unwanted (DoNotDownload) file, the

@@ -21,7 +21,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>JTC</AssemblyName>
     <ApplicationIcon>Assets\jtc.ico</ApplicationIcon>
-    <Version>0.8.1</Version>
+    <Version>0.8.2</Version>
   </PropertyGroup>
 
   <ItemGroup>
